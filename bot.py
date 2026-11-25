@@ -72,6 +72,7 @@ def load_state():
         "seen_files": [],
         "group_id": None,
         "status_message_id": None,
+        "status_is_photo": False,
     }
 
 
@@ -133,13 +134,22 @@ async def update_status_message(state):
     text = build_status_text(state)
     kb = variant_keyboard(state)
     try:
-        await bot.edit_message_text(
-            text,
-            chat_id=state["group_id"],
-            message_id=state["status_message_id"],
-            parse_mode="HTML",
-            reply_markup=kb,
-        )
+        if state.get("status_is_photo"):
+            await bot.edit_message_caption(
+                caption=text,
+                chat_id=state["group_id"],
+                message_id=state["status_message_id"],
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+        else:
+            await bot.edit_message_text(
+                text,
+                chat_id=state["group_id"],
+                message_id=state["status_message_id"],
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
     except Exception as e:
         logging.warning(f"Не смог обновить: {e}")
 
@@ -288,8 +298,35 @@ async def cmd_setgroup(message: Message):
     async with lock:
         state = load_state()
         state["status_message_id"] = sent.message_id
+        state["status_is_photo"] = False
         save_state(state)
-    await message.answer("Группа привязана.")
+    await message.answer("Группа привязана. Можешь прислать картинку — я поставлю её как основное сообщение.")
+
+
+@dp.message(F.photo, lambda m: is_admin(m.from_user.id))
+async def admin_photo(message: Message):
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer("Кидай картинку в группу.")
+        return
+    async with lock:
+        state = load_state()
+        if not state.get("group_id"):
+            await message.answer("Сначала напиши /setgroup в группе.")
+            return
+        text = build_status_text(state)
+        kb = variant_keyboard(state)
+        file_id = message.photo[-1].file_id
+        sent = await bot.send_photo(
+            state["group_id"],
+            file_id,
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+        state["status_message_id"] = sent.message_id
+        state["status_is_photo"] = True
+        save_state(state)
+    await message.answer("Картинка поставлена. Буду обновлять подпись под ней.")
 
 
 @dp.message(Command("newcontest"))
