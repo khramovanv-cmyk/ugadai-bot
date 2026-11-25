@@ -31,6 +31,7 @@ dp = Dispatcher(storage=MemoryStorage())
 
 lock = asyncio.Lock()
 BOT_USERNAME = None
+user_variant = {}  # user_id -> variant index
 
 
 class NewContest(StatesGroup):
@@ -198,6 +199,7 @@ async def cmd_start(message: Message):
             if d["user_id"] == message.from_user.id
         ]
         if not user_reserves:
+            user_variant[message.from_user.id] = idx
             await message.answer(
                 f"Вариант «{v['name']}».\n"
                 f"Номера {v['from_n']}–{v['to_n']}, цена {v['price']} ₽.\n"
@@ -549,13 +551,15 @@ async def handle_numbers(message: Message):
         if not state["variants"]:
             return
 
-        # Find which variant these numbers belong to
-        target = None
-        for vi, v in enumerate(state["variants"]):
-            valid = set(range(v["from_n"], v["to_n"] + 1))
-            if any(n in valid for n in numbers):
-                target = vi
-                break
+        # Prefer the variant the user selected via button
+        target = user_variant.get(message.from_user.id)
+        if target is None or target >= len(state["variants"]):
+            target = None
+            for vi, v in enumerate(state["variants"]):
+                valid = set(range(v["from_n"], v["to_n"] + 1))
+                if any(n in valid for n in numbers):
+                    target = vi
+                    break
         if target is None:
             await message.answer("Таких номеров нет ни в одном варианте.")
             return
