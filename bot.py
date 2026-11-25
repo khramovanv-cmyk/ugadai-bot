@@ -8,31 +8,19 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import (
-    Message,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
-# ================== НАСТРОЙКИ ==================
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
-
-PRICE = int(os.getenv("PRICE", "10"))
-RESERVE_MINUTES = int(os.getenv("RESERVE_MINUTES", "12"))
-NUMBERS = list(range(1, 6))
-
-SBP_PHONE = os.getenv("SBP_PHONE", "+79038784256")
-SBP_NAME = os.getenv("SBP_NAME", "Наталья")
-SBP_COMMENT = os.getenv("SBP_COMMENT", "подарок")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 DATA_DIR.mkdir(exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 
 MSK = ZoneInfo("Europe/Moscow")
-# ===============================================
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
@@ -42,16 +30,47 @@ lock = asyncio.Lock()
 BOT_USERNAME = None
 
 
+class NewContest(StatesGroup):
+    title = State()
+    subtitle = State()
+    range_from = State()
+    range_to = State()
+    price = State()
+    minutes = State()
+    sbp_phone = State()
+    sbp_name = State()
+    sbp_comment = State()
+    prizes = State()
+    confirm = State()
+
+
 def now_msk():
     return datetime.now(MSK)
+
+
+def default_contest():
+    return {
+        "title": "Угадай число. Получи! Бабло!",
+        "subtitle": "Улучшили условия для вас.",
+        "from_n": 1,
+        "to_n": 5,
+        "price": 10,
+        "minutes": 12,
+        "sbp_phone": "+79038784256",
+        "sbp_name": "Наталья",
+        "sbp_comment": "подарок",
+        "prizes": "",
+    }
 
 
 def load_state():
     if STATE_FILE.exists():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
+    c = default_contest()
     return {
-        "free": NUMBERS.copy(),
+        "contest": c,
+        "free": list(range(c["from_n"], c["to_n"] + 1)),
         "reserved": {},
         "sold": {},
         "seen_files": [],
@@ -73,35 +92,38 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
-def format_until(iso: str) -> str:
-    dt = datetime.fromisoformat(iso)
-    return dt.strftime("%H:%M")
+def numbers_range(contest):
+    return list(range(contest["from_n"], contest["to_n"] + 1))
 
 
 def build_status_text(state) -> str:
+    c = state["contest"]
     free = sorted(state["free"])
     free_str = ", ".join(map(str, free)) if free else "нет"
+    prizes = f"\n\n{c['prizes']}" if c.get("prizes") else ""
     return (
-        "<b>Угадай число. Получи! Бабло!</b>\n"
-        "Улучшили условия для вас.\n\n"
-        f"Номера 1–5, цена {PRICE} ₽\n"
-        f"Бронь {RESERVE_MINUTES} минут\n\n"
-        f"<b>Свободные:</b> {free_str}\n\n"
+        f"<b>{c['title']}</b>\n"
+        f"{c['subtitle']}\n\n"
+        f"Номера {c['from_n']}–{c['to_n']}, цена {c['price']} ₽\n"
+        f"Бронь {c['minutes']} минут\n\n"
+        f"<b>Свободные:</b> {free_str}"
+        f"{prizes}\n\n"
         "Напиши номер в чат или боту в личку.\n"
         "Чек — только в личку."
     )
 
 
-def payment_text(amount: int, numbers: list) -> str:
+def payment_text(state, amount: int, numbers: list) -> str:
+    c = state["contest"]
     nums = ", ".join(map(str, sorted(numbers)))
     return (
         f"Забронированы номера: <b>{nums}</b>\n"
         f"Сумма: <b>{amount} ₽</b>\n"
-        f"Время на оплату: {RESERVE_MINUTES} минут\n\n"
+        f"Время на оплату: {c['minutes']} минут\n\n"
         f"Реквизиты:\n"
-        f"СБП: {SBP_PHONE}\n"
-        f"Получатель: {SBP_NAME}\n"
-        f"Подпись к переводу: {SBP_COMMENT}\n\n"
+        f"СБП: {c['sbp_phone']}\n"
+        f"Получатель: {c['sbp_name']}\n"
+        f"Подпись к переводу: {c['sbp_comment']}\n\n"
         "После оплаты пришли сюда фото чека или PDF."
     )
 
@@ -157,14 +179,19 @@ async def cmd_start(message: Message):
         if not user_reserves:
             await message.answer("У тебя сейчас нет активной брони.")
             return
-        amount = len(user_reserves) * PRICE
-        await message.answer(payment_text(amount, user_reserves), parse_mode="HTML")
+        async with lock:
+            state = load_state()
+        amount = len(user_reserves) * state["contest"]["price"]
+        await message.answer(payment_text(state, amount, user_reserves), parse_mode="HTML")
         return
 
+    async with lock:
+        state = load_state()
+    c = state["contest"]
     await message.answer(
-        "Привет! Это бот конкурса «Угадай число. Получи! Бабло!»\n\n"
-        f"Номера 1–5, цена {PRICE} ₽\n"
-        f"Бронь {RESERVE_MINUTES} минут\n\n"
+        f"Привет! Это бот конкурса «{c['title']}»\n\n"
+        f"Номера {c['from_n']}–{c['to_n']}, цена {c['price']} ₽\n"
+        f"Бронь {c['minutes']} минут\n\n"
         "Напиши номер, например:\n"
         "<code>3</code>\n"
         "<code>1 4</code>\n\n"
@@ -200,7 +227,7 @@ async def cmd_list(message: Message):
         lines.append(f"{num}: {d['username']} (чек принят)")
     for num in sorted(int(n) for n in state["reserved"]):
         d = state["reserved"][str(num)]
-        lines.append(f"{num}: {d['username']} до {format_until(d['until'])}")
+        lines.append(f"{num}: {d['username']} до {datetime.fromisoformat(d['until']).strftime('%H:%M')}")
     if len(lines) == 1:
         lines.append("Пока пусто.")
     await message.answer("\n".join(lines), parse_mode="HTML")
@@ -236,6 +263,154 @@ async def cmd_setgroup(message: Message):
     await message.answer("Группа привязана. Это сообщение со свободными номерами я буду обновлять.")
 
 
+@dp.message(Command("newcontest"))
+async def cmd_newcontest(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    if message.chat.type != "private":
+        await message.answer("Эту команду пиши мне в личку.")
+        return
+    await state.set_state(NewContest.title)
+    await message.answer("Название конкурса?\n(например: Угадай число. Получи! Бабло!)")
+
+
+@dp.message(NewContest.title)
+async def step_title(message: Message, state: FSMContext):
+    await state.update_data(title=message.text.strip())
+    await state.set_state(NewContest.subtitle)
+    await message.answer("Подзаголовок?\n(например: Улучшили условия для вас.)")
+
+
+@dp.message(NewContest.subtitle)
+async def step_subtitle(message: Message, state: FSMContext):
+    await state.update_data(subtitle=message.text.strip())
+    await state.set_state(NewContest.range_from)
+    await message.answer("Номера от какого числа? (только число)")
+
+
+@dp.message(NewContest.range_from)
+async def step_from(message: Message, state: FSMContext):
+    if not message.text.strip().isdigit():
+        await message.answer("Напиши число.")
+        return
+    await state.update_data(from_n=int(message.text.strip()))
+    await state.set_state(NewContest.range_to)
+    await message.answer("До какого числа?")
+
+
+@dp.message(NewContest.range_to)
+async def step_to(message: Message, state: FSMContext):
+    if not message.text.strip().isdigit():
+        await message.answer("Напиши число.")
+        return
+    await state.update_data(to_n=int(message.text.strip()))
+    await state.set_state(NewContest.price)
+    await message.answer("Цена одного номера в рублях?")
+
+
+@dp.message(NewContest.price)
+async def step_price(message: Message, state: FSMContext):
+    if not message.text.strip().isdigit():
+        await message.answer("Напиши число.")
+        return
+    await state.update_data(price=int(message.text.strip()))
+    await state.set_state(NewContest.minutes)
+    await message.answer("Сколько минут на оплату?")
+
+
+@dp.message(NewContest.minutes)
+async def step_minutes(message: Message, state: FSMContext):
+    if not message.text.strip().isdigit():
+        await message.answer("Напиши число.")
+        return
+    await state.update_data(minutes=int(message.text.strip()))
+    await state.set_state(NewContest.sbp_phone)
+    await message.answer("Номер телефона для СБП?")
+
+
+@dp.message(NewContest.sbp_phone)
+async def step_phone(message: Message, state: FSMContext):
+    await state.update_data(sbp_phone=message.text.strip())
+    await state.set_state(NewContest.sbp_name)
+    await message.answer("Имя получателя?")
+
+
+@dp.message(NewContest.sbp_name)
+async def step_name(message: Message, state: FSMContext):
+    await state.update_data(sbp_name=message.text.strip())
+    await state.set_state(NewContest.sbp_comment)
+    await message.answer("Подпись к переводу?")
+
+
+@dp.message(NewContest.sbp_comment)
+async def step_comment(message: Message, state: FSMContext):
+    await state.update_data(sbp_comment=message.text.strip())
+    await state.set_state(NewContest.prizes)
+    await message.answer("Текст про призы (можно несколько строк). Или напиши «нет», если без призов пока.")
+
+
+@dp.message(NewContest.prizes)
+async def step_prizes(message: Message, state: FSMContext):
+    prizes = "" if message.text.strip().lower() == "нет" else message.text.strip()
+    await state.update_data(prizes=prizes)
+    data = await state.get_data()
+    await state.set_state(NewContest.confirm)
+    text = (
+        f"<b>Проверь:</b>\n"
+        f"{data['title']}\n"
+        f"{data['subtitle']}\n\n"
+        f"Номера: {data['from_n']}–{data['to_n']}\n"
+        f"Цена: {data['price']} ₽\n"
+        f"Бронь: {data['minutes']} мин\n"
+        f"СБП: {data['sbp_phone']}, {data['sbp_name']}, «{data['sbp_comment']}»\n"
+        f"Призы: {data['prizes'] or 'нет'}\n\n"
+        "Напиши <b>да</b> чтобы запустить, или <b>нет</b> чтобы отменить."
+    )
+    await message.answer(text, parse_mode="HTML")
+
+
+@dp.message(NewContest.confirm)
+async def step_confirm(message: Message, state: FSMContext):
+    if message.text.strip().lower() != "да":
+        await state.clear()
+        await message.answer("Отменено.")
+        return
+
+    data = await state.get_data()
+    await state.clear()
+
+    async with lock:
+        st = load_state()
+        st["contest"] = {
+            "title": data["title"],
+            "subtitle": data["subtitle"],
+            "from_n": data["from_n"],
+            "to_n": data["to_n"],
+            "price": data["price"],
+            "minutes": data["minutes"],
+            "sbp_phone": data["sbp_phone"],
+            "sbp_name": data["sbp_name"],
+            "sbp_comment": data["sbp_comment"],
+            "prizes": data["prizes"],
+        }
+        st["free"] = list(range(data["from_n"], data["to_n"] + 1))
+        st["reserved"] = {}
+        st["sold"] = {}
+        st["seen_files"] = []
+        save_state(st)
+
+        if st.get("group_id"):
+            text = build_status_text(st)
+            try:
+                sent = await bot.send_message(st["group_id"], text, parse_mode="HTML")
+                st["status_message_id"] = sent.message_id
+                save_state(st)
+            except Exception as e:
+                logging.warning(f"Не смог отправить в группу: {e}")
+
+    await message.answer("Конкурс запущен. Старые брони сброшены.")
+
+
 def parse_numbers(text: str):
     clean = text.lower().replace("беру", " ").replace(",", " ")
     parts = [p for p in clean.split() if p.isdigit()]
@@ -253,7 +428,6 @@ async def handle_check(message: Message):
         file_id = message.photo[-1].file_unique_id
     elif message.document:
         file_id = message.document.file_unique_id
-
     if not file_id:
         return
 
@@ -300,13 +474,15 @@ async def handle_numbers(message: Message):
         return
 
     numbers = list(dict.fromkeys(numbers))
-    invalid = [n for n in numbers if n not in NUMBERS]
-    if invalid:
-        await message.answer(f"Номера {invalid} не существуют. Доступны только 1–5.")
-        return
 
     async with lock:
         state = load_state()
+        valid = numbers_range(state["contest"])
+        invalid = [n for n in numbers if n not in valid]
+        if invalid:
+            await message.answer(f"Номера {invalid} не существуют. Доступны {state['contest']['from_n']}–{state['contest']['to_n']}.")
+            return
+
         available = []
         taken = []
         for n in numbers:
@@ -323,7 +499,8 @@ async def handle_numbers(message: Message):
 
         user_id = message.from_user.id
         username = get_user_name(message.from_user)
-        until = (now_msk() + timedelta(minutes=RESERVE_MINUTES)).isoformat()
+        minutes = state["contest"]["minutes"]
+        until = (now_msk() + timedelta(minutes=minutes)).isoformat()
 
         for n in available:
             state["free"].remove(n)
@@ -336,11 +513,11 @@ async def handle_numbers(message: Message):
         save_state(state)
         await update_status_message(state)
 
-    amount = len(available) * PRICE
+    amount = len(available) * state["contest"]["price"]
     nums_str = ", ".join(map(str, sorted(available)))
 
     if message.chat.type == "private":
-        await message.answer(payment_text(amount, available), parse_mode="HTML")
+        await message.answer(payment_text(state, amount, available), parse_mode="HTML")
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(
@@ -350,7 +527,7 @@ async def handle_numbers(message: Message):
         ]])
         await message.answer(
             f"Забронированы номера: <b>{nums_str}</b>\n"
-            f"На {RESERVE_MINUTES} минут.\n"
+            f"На {state['contest']['minutes']} минут.\n"
             "Нажми кнопку и пришли чек в личку.",
             reply_markup=kb,
             parse_mode="HTML",
