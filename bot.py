@@ -24,6 +24,8 @@ DATA_DIR.mkdir(exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 
 MSK = ZoneInfo("Europe/Moscow")
+def now_msk():
+    return datetime.now(MSK)
 
 def now_msk():
     return datetime.now(MSK)
