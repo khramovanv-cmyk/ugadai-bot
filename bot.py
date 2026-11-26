@@ -25,6 +25,9 @@ STATE_FILE = DATA_DIR / "state.json"
 
 MSK = ZoneInfo("Europe/Moscow")
 
+def now_msk():
+    return datetime.now(MSK)
+
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -498,117 +501,126 @@ def parse_numbers(text: str):
 
 @dp.message(F.photo | F.document)
 async def handle_check(message: Message):
-    if message.chat.type != "private":
-        await message.answer("Чек в личку.")
-        return
-    file_id = message.photo[-1].file_unique_id if message.photo else (
-        message.document.file_unique_id if message.document else None
-    )
-    if not file_id:
-        return
-    async with lock:
-        state = load_state()
-        if file_id in state["seen_files"]:
-            await message.answer("Этот файл уже был.")
+    try:
+        if message.chat.type != "private":
+            await message.answer("Чек в личку.")
             return
-        found = []
-        for vi, v in enumerate(state["variants"]):
-            nums = [int(n) for n, d in v["reserved"].items() if d["user_id"] == message.from_user.id]
-            if nums:
-                found.append((vi, nums))
-        if not found:
-            await message.answer("Нет активной брони.")
+        file_id = message.photo[-1].file_unique_id if message.photo else (
+            message.document.file_unique_id if message.document else None
+        )
+        if not file_id:
             return
-        for vi, nums in found:
-            v = state["variants"][vi]
-            for num in nums:
-                data = v["reserved"].pop(str(num))
-                v["sold"][str(num)] = {
-                    "user_id": message.from_user.id,
-                    "username": data["username"],
-                    "paid_at": now_msk().isoformat(),
-                }
-        state["seen_files"].append(file_id)
-        save_state(state)
-        await update_status_message(state)
-    all_nums = []
-    for _, nums in found:
-        all_nums.extend(nums)
-    await message.answer(f"Чек получен. Номера {', '.join(map(str, sorted(all_nums)))} закреплены.")
+        async with lock:
+            state = load_state()
+            if file_id in state["seen_files"]:
+                await message.answer("Этот файл уже был.")
+                return
+            found = []
+            for vi, v in enumerate(state["variants"]):
+                nums = [int(n) for n, d in v["reserved"].items() if d["user_id"] == message.from_user.id]
+                if nums:
+                    found.append((vi, nums))
+            if not found:
+                await message.answer("Нет активной брони.")
+                return
+            for vi, nums in found:
+                v = state["variants"][vi]
+                for num in nums:
+                    data = v["reserved"].pop(str(num))
+                    v["sold"][str(num)] = {
+                        "user_id": message.from_user.id,
+                        "username": data["username"],
+                        "paid_at": now_msk().isoformat(),
+                    }
+            state["seen_files"].append(file_id)
+            save_state(state)
+            await update_status_message(state)
+        all_nums = []
+        for _, nums in found:
+            all_nums.extend(nums)
+        await message.answer(f"Чек получен. Номера {', '.join(map(str, sorted(all_nums)))} закреплены.")
+    except Exception as e:
+        logging.exception("Ошибка в handle_check")
+        await message.answer("Не смог принять чек. Попробуй ещё раз.")
 
 
 @dp.message(F.text)
 async def handle_numbers(message: Message):
-    if message.text.startswith("/"):
-        return
-    numbers = parse_numbers(message.text)
-    if not numbers:
-        return
-    numbers = list(dict.fromkeys(numbers))
-
-    async with lock:
-        state = load_state()
-        if not state["variants"]:
+    try:
+        if message.text.startswith("/"):
             return
-
-        # Prefer the variant the user selected via button
-        target = user_variant.get(message.from_user.id)
-        if target is None or target >= len(state["variants"]):
-            target = None
-            for vi, v in enumerate(state["variants"]):
-                valid = set(range(v["from_n"], v["to_n"] + 1))
-                if any(n in valid for n in numbers):
-                    target = vi
-                    break
-        if target is None:
-            await message.answer("Таких номеров нет ни в одном варианте.")
+        numbers = parse_numbers(message.text)
+        if not numbers:
             return
+        numbers = list(dict.fromkeys(numbers))
 
-        v = state["variants"][target]
-        valid = set(range(v["from_n"], v["to_n"] + 1))
-        available, taken = [], []
-        for n in numbers:
-            if n not in valid:
-                continue
-            if n in v["free"]:
-                available.append(n)
-            else:
-                taken.append(n)
+        async with lock:
+            state = load_state()
+            if not state["variants"]:
+                await message.answer("Конкурс ещё не запущен.")
+                return
 
-        if not available:
-            free = ", ".join(map(str, sorted(v["free"]))) or "нет"
-            await message.answer(f"Занято. Свободные в «{v['name']}»: {free}")
-            return
+            # Prefer the variant the user selected via button
+            target = user_variant.get(message.from_user.id)
+            if target is None or target >= len(state["variants"]):
+                target = None
+                for vi, v in enumerate(state["variants"]):
+                    valid = set(range(v["from_n"], v["to_n"] + 1))
+                    if any(n in valid for n in numbers):
+                        target = vi
+                        break
+            if target is None:
+                await message.answer("Таких номеров нет ни в одном варианте.")
+                return
 
-        until = (now_msk() + timedelta(minutes=v["minutes"])).isoformat()
-        for n in available:
-            v["free"].remove(n)
-            v["reserved"][str(n)] = {
-                "user_id": message.from_user.id,
-                "username": get_user_name(message.from_user),
-                "until": until,
-                "check_received": False,
-            }
-        save_state(state)
-        await update_status_message(state)
+            v = state["variants"][target]
+            valid = set(range(v["from_n"], v["to_n"] + 1))
+            available, taken = [], []
+            for n in numbers:
+                if n not in valid:
+                    continue
+                if n in v["free"]:
+                    available.append(n)
+                else:
+                    taken.append(n)
 
-    amount = len(available) * v["price"]
-    nums_str = ", ".join(map(str, sorted(available)))
+            if not available:
+                free = ", ".join(map(str, sorted(v["free"]))) or "нет"
+                await message.answer(f"Занято. Свободные в «{v['name']}»: {free}")
+                return
 
-    if message.chat.type == "private":
-        await message.answer(payment_text(state, v, amount, available), parse_mode="HTML")
-    else:
-        url = f"https://t.me/{BOT_USERNAME}?start=pay_{target}"
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Перейти к оплате", url=url)
-        ]])
-        await message.answer(
-            f"«{v['name']}»: номера <b>{nums_str}</b> на {v['minutes']} мин.\nНажми кнопку.",
-            reply_markup=kb,
-            parse_mode="HTML",
-        )
-    if taken:
-        await message.answer(f"Уже заняты: {taken}")
+            until = (now_msk() + timedelta(minutes=v["minutes"])).isoformat()
+            for n in available:
+                v["free"].remove(n)
+                v["reserved"][str(n)] = {
+                    "user_id": message.from_user.id,
+                    "username": get_user_name(message.from_user),
+                    "until": until,
+                    "check_received": False,
+                }
+            save_state(state)
+            await update_status_message(state)
+
+        amount = len(available) * v["price"]
+        nums_str = ", ".join(map(str, sorted(available)))
+
+        if message.chat.type == "private":
+            await message.answer(payment_text(state, v, amount, available), parse_mode="HTML")
+        else:
+            url = f"https://t.me/{BOT_USERNAME}?start=pay_{target}"
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Перейти к оплате", url=url)
+            ]])
+            await message.answer(
+                f"«{v['name']}»: номера <b>{nums_str}</b> на {v['minutes']} мин.\nНажми кнопку.",
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+        if taken:
+            await message.answer(f"Уже заняты: {taken}")
+    except Exception as e:
+        logging.exception("Ошибка в handle_numbers")
+        await message.answer("Что-то пошло не так. Попробуй ещё раз или напиши админу.")
 
 
 async def main():
