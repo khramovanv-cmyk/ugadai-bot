@@ -24,8 +24,6 @@ DATA_DIR.mkdir(exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 
 MSK = ZoneInfo("Europe/Moscow")
-def now_msk():
-    return datetime.now(MSK)
 
 def now_msk():
     return datetime.now(MSK)
@@ -106,7 +104,7 @@ def build_status_text(state) -> str:
             f"Номера {v['from_n']}–{v['to_n']}, {v['price']} ₽, бронь {v['minutes']} мин{prizes}\n"
             f"Свободные: {free_str}\n"
         )
-    lines.append("Нажми кнопку варианта, потом напиши номер.\nЧек — только в личку.")
+    lines.append("👇 Нажми кнопку ниже, потом напиши номер.\nЧек — только в личку.")
     return "\n".join(lines)
 
 
@@ -114,10 +112,12 @@ def variant_keyboard(state):
     buttons = []
     for i, v in enumerate(state["variants"]):
         buttons.append([InlineKeyboardButton(
-            text=f"{v['name']} — {v['price']} ₽",
+            text=f"🎯 {v['name']} — {v['price']} ₽",
             callback_data=f"var_{i}",
         )])
-    return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+    if not buttons:
+        buttons.append([InlineKeyboardButton(text="🎯 Выбрать номер", callback_data="var_0")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def payment_text(state, variant, amount, numbers):
