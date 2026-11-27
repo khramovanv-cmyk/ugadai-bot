@@ -203,16 +203,17 @@ async def cmd_start(message: Message):
             int(n) for n, d in v["reserved"].items()
             if d["user_id"] == message.from_user.id
         ]
-        if not user_reserves:
-            user_variant[message.from_user.id] = idx
-            await message.answer(
-                f"Вариант «{v['name']}».\n"
-                f"Номера {v['from_n']}–{v['to_n']}, цена {v['price']} ₽.\n"
-                "Напиши номер, например 3 или 1 4."
-            )
+        if user_reserves:
+            amount = len(user_reserves) * v["price"]
+            await message.answer(payment_text(state, v, amount, user_reserves), parse_mode="HTML")
             return
-        amount = len(user_reserves) * v["price"]
-        await message.answer(payment_text(state, v, amount, user_reserves), parse_mode="HTML")
+        # no reservation yet — ask once
+        user_variant[message.from_user.id] = idx
+        await message.answer(
+            f"Вариант «{v['name']}».\n"
+            f"Номера {v['from_n']}–{v['to_n']}, цена {v['price']} ₽.\n"
+            "Напиши номер (например 3 или 1 4), я сразу покажу оплату."
+        )
         return
 
     async with lock:
@@ -622,10 +623,10 @@ async def handle_numbers(message: Message):
         else:
             url = f"https://t.me/{BOT_USERNAME}?start=pay_{target}"
             kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="Перейти к оплате", url=url)
+                InlineKeyboardButton(text="💳 Оплатить в боте", url=url)
             ]])
             await message.answer(
-                f"«{v['name']}»: номера <b>{nums_str}</b> на {v['minutes']} мин.\nНажми кнопку.",
+                f"«{v['name']}»: номера <b>{nums_str}</b> забронированы на {v['minutes']} мин.\nНажми кнопку — сразу откроется оплата.",
                 reply_markup=kb,
                 parse_mode="HTML",
             )
