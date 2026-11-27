@@ -577,14 +577,25 @@ async def handle_numbers(message: Message):
 
             v = state["variants"][target]
             valid = set(range(v["from_n"], v["to_n"] + 1))
-            available, taken = [], []
+            available, taken, own = [], [], []
             for n in numbers:
                 if n not in valid:
                     continue
                 if n in v["free"]:
                     available.append(n)
                 else:
-                    taken.append(n)
+                    # already reserved?
+                    res = v["reserved"].get(str(n))
+                    if res and res["user_id"] == message.from_user.id:
+                        own.append(n)
+                    else:
+                        taken.append(n)
+
+            if not available and own:
+                # user already has these numbers reserved — just show payment
+                amount = len(own) * v["price"]
+                await message.answer(payment_text(state, v, amount, own), parse_mode="HTML")
+                return
 
             if not available:
                 free = ", ".join(map(str, sorted(v["free"]))) or "нет"
@@ -642,4 +653,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())o.run(main())
