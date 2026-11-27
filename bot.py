@@ -104,7 +104,7 @@ def build_status_text(state) -> str:
             f"Номера {v['from_n']}–{v['to_n']}, {v['price']} ₽, бронь {v['minutes']} мин{prizes}\n"
             f"Свободные: {free_str}\n"
         )
-    lines.append("👇 Нажми кнопку ниже, потом напиши номер.\nЧек — только в личку.")
+    lines.append("Нажми кнопку варианта, потом напиши номер.\nЧек — только в личку.")
     return "\n".join(lines)
 
 
@@ -112,12 +112,10 @@ def variant_keyboard(state):
     buttons = []
     for i, v in enumerate(state["variants"]):
         buttons.append([InlineKeyboardButton(
-            text=f"🎯 {v['name']} — {v['price']} ₽",
+            text=f"{v['name']} — {v['price']} ₽",
             callback_data=f"var_{i}",
         )])
-    if not buttons:
-        buttons.append([InlineKeyboardButton(text="🎯 Выбрать номер", callback_data="var_0")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
 
 
 def payment_text(state, variant, amount, numbers):
@@ -203,17 +201,16 @@ async def cmd_start(message: Message):
             int(n) for n, d in v["reserved"].items()
             if d["user_id"] == message.from_user.id
         ]
-        if user_reserves:
-            amount = len(user_reserves) * v["price"]
-            await message.answer(payment_text(state, v, amount, user_reserves), parse_mode="HTML")
+        if not user_reserves:
+            user_variant[message.from_user.id] = idx
+            await message.answer(
+                f"Вариант «{v['name']}».\n"
+                f"Номера {v['from_n']}–{v['to_n']}, цена {v['price']} ₽.\n"
+                "Напиши номер, например 3 или 1 4."
+            )
             return
-        # no reservation yet — ask once
-        user_variant[message.from_user.id] = idx
-        await message.answer(
-            f"Вариант «{v['name']}».\n"
-            f"Номера {v['from_n']}–{v['to_n']}, цена {v['price']} ₽.\n"
-            "Напиши номер (например 3 или 1 4), я сразу покажу оплату."
-        )
+        amount = len(user_reserves) * v["price"]
+        await message.answer(payment_text(state, v, amount, user_reserves), parse_mode="HTML")
         return
 
     async with lock:
@@ -578,25 +575,14 @@ async def handle_numbers(message: Message):
 
             v = state["variants"][target]
             valid = set(range(v["from_n"], v["to_n"] + 1))
-            available, taken, own = [], [], []
+            available, taken = [], []
             for n in numbers:
                 if n not in valid:
                     continue
                 if n in v["free"]:
                     available.append(n)
                 else:
-                    # already reserved?
-                    res = v["reserved"].get(str(n))
-                    if res and res["user_id"] == message.from_user.id:
-                        own.append(n)
-                    else:
-                        taken.append(n)
-
-            if not available and own:
-                # user already has these numbers reserved — just show payment
-                amount = len(own) * v["price"]
-                await message.answer(payment_text(state, v, amount, own), parse_mode="HTML")
-                return
+                    taken.append(n)
 
             if not available:
                 free = ", ".join(map(str, sorted(v["free"]))) or "нет"
@@ -623,10 +609,10 @@ async def handle_numbers(message: Message):
         else:
             url = f"https://t.me/{BOT_USERNAME}?start=pay_{target}"
             kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="💳 Оплатить в боте", url=url)
+                InlineKeyboardButton(text="Перейти к оплате", url=url)
             ]])
             await message.answer(
-                f"«{v['name']}»: номера <b>{nums_str}</b> забронированы на {v['minutes']} мин.\nНажми кнопку — сразу откроется оплата.",
+                f"«{v['name']}»: номера <b>{nums_str}</b> на {v['minutes']} мин.\nНажми кнопку.",
                 reply_markup=kb,
                 parse_mode="HTML",
             )
@@ -635,6 +621,26 @@ async def handle_numbers(message: Message):
     except Exception as e:
         logging.exception("Ошибка в handle_numbers")
         await message.answer("Что-то пошло не так. Попробуй ещё раз или напиши админу.")
+
+
+@dp.message(F.new_chat_members)
+async def on_new_members(message: Message):
+    # Приветствие новых участников
+    for member in message.new_chat_members:
+        if member.is_bot:
+            continue
+        name = member.first_name or member.full_name or "друг"
+        text = (
+            f"{name}, здравствуйте! 👋\n\n"
+            f"Приветствуем в группе конкурсов «Угадай число».\n\n"
+            f"Здесь можно выбрать свободный номер, оплатить по СБП и участвовать в розыгрыше.\n"
+            f"Свободные номера — в закреплённом сообщении выше.\n\n"
+            f"Удачи, и пусть номер будет счастливым! 🎲"
+        )
+        try:
+            await message.answer(text)
+        except Exception as e:
+            logging.warning(f"Не смог поприветствовать: {e}")
 
 
 async def main():
